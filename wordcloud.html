@@ -1,0 +1,1351 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="http://d3js.org/d3.v3.min.js"></script>
+<script src="https://raw.github.com/jasondavies/d3-cloud/master/d3.layout.cloud.js"></script>
+</head>
+<body>
+<script>
+
+  // embed Jason Davies' d3-cloud since it's not available in a CDN
+  (function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g=(g.d3||(g.d3 = {}));g=(g.layout||(g.layout = {}));g.cloud = f()}})(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+// Word cloud layout by Jason Davies, https://www.jasondavies.com/wordcloud/
+// Algorithm due to Jonathan Feinberg, http://static.mrfeinberg.com/bv_ch03.pdf
+
+var dispatch = require("d3-dispatch").dispatch;
+
+var cloudRadians = Math.PI / 180,
+    cw = 1 << 11 >> 5,
+    ch = 1 << 11;
+
+module.exports = function() {
+  var size = [256, 256],
+      text = cloudText,
+      font = cloudFont,
+      fontSize = cloudFontSize,
+      fontStyle = cloudFontNormal,
+      fontWeight = cloudFontNormal,
+      rotate = cloudRotate,
+      padding = cloudPadding,
+      spiral = archimedeanSpiral,
+      words = [],
+      timeInterval = Infinity,
+      event = dispatch("word", "end"),
+      timer = null,
+      random = Math.random,
+      cloud = {},
+      canvas = cloudCanvas;
+
+  cloud.canvas = function(_) {
+    return arguments.length ? (canvas = functor(_), cloud) : canvas;
+  };
+
+  cloud.start = function() {
+    var contextAndRatio = getContext(canvas()),
+        board = zeroArray((size[0] >> 5) * size[1]),
+        bounds = null,
+        n = words.length,
+        i = -1,
+        tags = [],
+        data = words.map(function(d, i) {
+          d.text = text.call(this, d, i);
+          d.font = font.call(this, d, i);
+          d.style = fontStyle.call(this, d, i);
+          d.weight = fontWeight.call(this, d, i);
+          d.rotate = rotate.call(this, d, i);
+          d.size = ~~fontSize.call(this, d, i);
+          d.padding = padding.call(this, d, i);
+          return d;
+        }).sort(function(a, b) { return b.size - a.size; });
+
+    if (timer) clearInterval(timer);
+    timer = setInterval(step, 0);
+    step();
+
+    return cloud;
+
+    function step() {
+      var start = Date.now();
+      while (Date.now() - start < timeInterval && ++i < n && timer) {
+        var d = data[i];
+        d.x = (size[0] * (random() + .5)) >> 1;
+        d.y = (size[1] * (random() + .5)) >> 1;
+        cloudSprite(contextAndRatio, d, data, i);
+        if (d.hasText && place(board, d, bounds)) {
+          tags.push(d);
+          event.word(d);
+          if (bounds) cloudBounds(bounds, d);
+          else bounds = [{x: d.x + d.x0, y: d.y + d.y0}, {x: d.x + d.x1, y: d.y + d.y1}];
+          // Temporary hack
+          d.x -= size[0] >> 1;
+          d.y -= size[1] >> 1;
+        }
+      }
+      if (i >= n) {
+        cloud.stop();
+        event.end(tags, bounds);
+      }
+    }
+  }
+
+  cloud.stop = function() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+    return cloud;
+  };
+
+  function getContext(canvas) {
+    canvas.width = canvas.height = 1;
+    var ratio = Math.sqrt(canvas.getContext("2d").getImageData(0, 0, 1, 1).data.length >> 2);
+    canvas.width = (cw << 5) / ratio;
+    canvas.height = ch / ratio;
+
+    var context = canvas.getContext("2d");
+    context.fillStyle = context.strokeStyle = "red";
+    context.textAlign = "center";
+
+    return {context: context, ratio: ratio};
+  }
+
+  function place(board, tag, bounds) {
+    var perimeter = [{x: 0, y: 0}, {x: size[0], y: size[1]}],
+        startX = tag.x,
+        startY = tag.y,
+        maxDelta = Math.sqrt(size[0] * size[0] + size[1] * size[1]),
+        s = spiral(size),
+        dt = random() < .5 ? 1 : -1,
+        t = -dt,
+        dxdy,
+        dx,
+        dy;
+
+    while (dxdy = s(t += dt)) {
+      dx = ~~dxdy[0];
+      dy = ~~dxdy[1];
+
+      if (Math.min(Math.abs(dx), Math.abs(dy)) >= maxDelta) break;
+
+      tag.x = startX + dx;
+      tag.y = startY + dy;
+
+      if (tag.x + tag.x0 < 0 || tag.y + tag.y0 < 0 ||
+          tag.x + tag.x1 > size[0] || tag.y + tag.y1 > size[1]) continue;
+      // TODO only check for collisions within current bounds.
+      if (!bounds || !cloudCollide(tag, board, size[0])) {
+        if (!bounds || collideRects(tag, bounds)) {
+          var sprite = tag.sprite,
+              w = tag.width >> 5,
+              sw = size[0] >> 5,
+              lx = tag.x - (w << 4),
+              sx = lx & 0x7f,
+              msx = 32 - sx,
+              h = tag.y1 - tag.y0,
+              x = (tag.y + tag.y0) * sw + (lx >> 5),
+              last;
+          for (var j = 0; j < h; j++) {
+            last = 0;
+            for (var i = 0; i <= w; i++) {
+              board[x + i] |= (last << msx) | (i < w ? (last = sprite[j * w + i]) >>> sx : 0);
+            }
+            x += sw;
+          }
+          delete tag.sprite;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  cloud.timeInterval = function(_) {
+    return arguments.length ? (timeInterval = _ == null ? Infinity : _, cloud) : timeInterval;
+  };
+
+  cloud.words = function(_) {
+    return arguments.length ? (words = _, cloud) : words;
+  };
+
+  cloud.size = function(_) {
+    return arguments.length ? (size = [+_[0], +_[1]], cloud) : size;
+  };
+
+  cloud.font = function(_) {
+    return arguments.length ? (font = functor(_), cloud) : font;
+  };
+
+  cloud.fontStyle = function(_) {
+    return arguments.length ? (fontStyle = functor(_), cloud) : fontStyle;
+  };
+
+  cloud.fontWeight = function(_) {
+    return arguments.length ? (fontWeight = functor(_), cloud) : fontWeight;
+  };
+
+  cloud.rotate = function(_) {
+    return arguments.length ? (rotate = functor(_), cloud) : rotate;
+  };
+
+  cloud.text = function(_) {
+    return arguments.length ? (text = functor(_), cloud) : text;
+  };
+
+  cloud.spiral = function(_) {
+    return arguments.length ? (spiral = spirals[_] || _, cloud) : spiral;
+  };
+
+  cloud.fontSize = function(_) {
+    return arguments.length ? (fontSize = functor(_), cloud) : fontSize;
+  };
+
+  cloud.padding = function(_) {
+    return arguments.length ? (padding = functor(_), cloud) : padding;
+  };
+
+  cloud.random = function(_) {
+    return arguments.length ? (random = _, cloud) : random;
+  };
+
+  cloud.on = function() {
+    var value = event.on.apply(event, arguments);
+    return value === event ? cloud : value;
+  };
+
+  return cloud;
+};
+
+function cloudText(d) {
+  return d.text;
+}
+
+function cloudFont() {
+  return "serif";
+}
+
+function cloudFontNormal() {
+  return "normal";
+}
+
+function cloudFontSize(d) {
+  return Math.sqrt(d.value);
+}
+
+function cloudRotate() {
+  return (~~(Math.random() * 6) - 3) * 30;
+}
+
+function cloudPadding() {
+  return 1;
+}
+
+// Fetches a monochrome sprite bitmap for the specified text.
+// Load in batches for speed.
+function cloudSprite(contextAndRatio, d, data, di) {
+  if (d.sprite) return;
+  var c = contextAndRatio.context,
+      ratio = contextAndRatio.ratio;
+
+  c.clearRect(0, 0, (cw << 5) / ratio, ch / ratio);
+  var x = 0,
+      y = 0,
+      maxh = 0,
+      n = data.length;
+  --di;
+  while (++di < n) {
+    d = data[di];
+    c.save();
+    c.font = d.style + " " + d.weight + " " + ~~((d.size + 1) / ratio) + "px " + d.font;
+    var w = c.measureText(d.text + "m").width * ratio,
+        h = d.size << 1;
+    if (d.rotate) {
+      var sr = Math.sin(d.rotate * cloudRadians),
+          cr = Math.cos(d.rotate * cloudRadians),
+          wcr = w * cr,
+          wsr = w * sr,
+          hcr = h * cr,
+          hsr = h * sr;
+      w = (Math.max(Math.abs(wcr + hsr), Math.abs(wcr - hsr)) + 0x1f) >> 5 << 5;
+      h = ~~Math.max(Math.abs(wsr + hcr), Math.abs(wsr - hcr));
+    } else {
+      w = (w + 0x1f) >> 5 << 5;
+    }
+    if (h > maxh) maxh = h;
+    if (x + w >= (cw << 5)) {
+      x = 0;
+      y += maxh;
+      maxh = 0;
+    }
+    if (y + h >= ch) break;
+    c.translate((x + (w >> 1)) / ratio, (y + (h >> 1)) / ratio);
+    if (d.rotate) c.rotate(d.rotate * cloudRadians);
+    c.fillText(d.text, 0, 0);
+    if (d.padding) c.lineWidth = 2 * d.padding, c.strokeText(d.text, 0, 0);
+    c.restore();
+    d.width = w;
+    d.height = h;
+    d.xoff = x;
+    d.yoff = y;
+    d.x1 = w >> 1;
+    d.y1 = h >> 1;
+    d.x0 = -d.x1;
+    d.y0 = -d.y1;
+    d.hasText = true;
+    x += w;
+  }
+  var pixels = c.getImageData(0, 0, (cw << 5) / ratio, ch / ratio).data,
+      sprite = [];
+  while (--di >= 0) {
+    d = data[di];
+    if (!d.hasText) continue;
+    var w = d.width,
+        w32 = w >> 5,
+        h = d.y1 - d.y0;
+    // Zero the buffer
+    for (var i = 0; i < h * w32; i++) sprite[i] = 0;
+    x = d.xoff;
+    if (x == null) return;
+    y = d.yoff;
+    var seen = 0,
+        seenRow = -1;
+    for (var j = 0; j < h; j++) {
+      for (var i = 0; i < w; i++) {
+        var k = w32 * j + (i >> 5),
+            m = pixels[((y + j) * (cw << 5) + (x + i)) << 2] ? 1 << (31 - (i % 32)) : 0;
+        sprite[k] |= m;
+        seen |= m;
+      }
+      if (seen) seenRow = j;
+      else {
+        d.y0++;
+        h--;
+        j--;
+        y++;
+      }
+    }
+    d.y1 = d.y0 + seenRow;
+    d.sprite = sprite.slice(0, (d.y1 - d.y0) * w32);
+  }
+}
+
+// Use mask-based collision detection.
+function cloudCollide(tag, board, sw) {
+  sw >>= 5;
+  var sprite = tag.sprite,
+      w = tag.width >> 5,
+      lx = tag.x - (w << 4),
+      sx = lx & 0x7f,
+      msx = 32 - sx,
+      h = tag.y1 - tag.y0,
+      x = (tag.y + tag.y0) * sw + (lx >> 5),
+      last;
+  for (var j = 0; j < h; j++) {
+    last = 0;
+    for (var i = 0; i <= w; i++) {
+      if (((last << msx) | (i < w ? (last = sprite[j * w + i]) >>> sx : 0))
+          & board[x + i]) return true;
+    }
+    x += sw;
+  }
+  return false;
+}
+
+function cloudBounds(bounds, d) {
+  var b0 = bounds[0],
+      b1 = bounds[1];
+  if (d.x + d.x0 < b0.x) b0.x = d.x + d.x0;
+  if (d.y + d.y0 < b0.y) b0.y = d.y + d.y0;
+  if (d.x + d.x1 > b1.x) b1.x = d.x + d.x1;
+  if (d.y + d.y1 > b1.y) b1.y = d.y + d.y1;
+}
+
+function collideRects(a, b) {
+  return a.x + a.x1 > b[0].x && a.x + a.x0 < b[1].x && a.y + a.y1 > b[0].y && a.y + a.y0 < b[1].y;
+}
+
+function archimedeanSpiral(size) {
+  var e = size[0] / size[1];
+  return function(t) {
+    return [e * (t *= .1) * Math.cos(t), t * Math.sin(t)];
+  };
+}
+
+function rectangularSpiral(size) {
+  var dy = 4,
+      dx = dy * size[0] / size[1],
+      x = 0,
+      y = 0;
+  return function(t) {
+    var sign = t < 0 ? -1 : 1;
+    // See triangular numbers: T_n = n * (n + 1) / 2.
+    switch ((Math.sqrt(1 + 4 * sign * t) - sign) & 3) {
+      case 0:  x += dx; break;
+      case 1:  y += dy; break;
+      case 2:  x -= dx; break;
+      default: y -= dy; break;
+    }
+    return [x, y];
+  };
+}
+
+// TODO reuse arrays?
+function zeroArray(n) {
+  var a = [],
+      i = -1;
+  while (++i < n) a[i] = 0;
+  return a;
+}
+
+function cloudCanvas() {
+  return document.createElement("canvas");
+}
+
+function functor(d) {
+  return typeof d === "function" ? d : function() { return d; };
+}
+
+var spirals = {
+  archimedean: archimedeanSpiral,
+  rectangular: rectangularSpiral
+};
+
+},{"d3-dispatch":2}],2:[function(require,module,exports){
+(function (global, factory) {
+  typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
+  typeof define === 'function' && define.amd ? define(['exports'], factory) :
+  factory((global.dispatch = {}));
+}(this, function (exports) { 'use strict';
+
+  function Dispatch(types) {
+    var i = -1,
+        n = types.length,
+        callbacksByType = {},
+        callbackByName = {},
+        type,
+        that = this;
+
+    that.on = function(type, callback) {
+      type = parseType(type);
+
+      // Return the current callback, if any.
+      if (arguments.length < 2) {
+        return (callback = callbackByName[type.name]) && callback.value;
+      }
+
+      // If a type was specified…
+      if (type.type) {
+        var callbacks = callbacksByType[type.type],
+            callback0 = callbackByName[type.name],
+            i;
+
+        // Remove the current callback, if any, using copy-on-remove.
+        if (callback0) {
+          callback0.value = null;
+          i = callbacks.indexOf(callback0);
+          callbacksByType[type.type] = callbacks = callbacks.slice(0, i).concat(callbacks.slice(i + 1));
+          delete callbackByName[type.name];
+        }
+
+        // Add the new callback, if any.
+        if (callback) {
+          callback = {value: callback};
+          callbackByName[type.name] = callback;
+          callbacks.push(callback);
+        }
+      }
+
+      // Otherwise, if a null callback was specified, remove all callbacks with the given name.
+      else if (callback == null) {
+        for (var otherType in callbacksByType) {
+          if (callback = callbackByName[otherType + type.name]) {
+            callback.value = null;
+            var callbacks = callbacksByType[otherType], i = callbacks.indexOf(callback);
+            callbacksByType[otherType] = callbacks.slice(0, i).concat(callbacks.slice(i + 1));
+            delete callbackByName[callback.name];
+          }
+        }
+      }
+
+      return that;
+    };
+
+    while (++i < n) {
+      type = types[i] + "";
+      if (!type || (type in that)) throw new Error("illegal or duplicate type: " + type);
+      callbacksByType[type] = [];
+      that[type] = applier(type);
+    }
+
+    function parseType(type) {
+      var i = (type += "").indexOf("."), name = type;
+      if (i >= 0) type = type.slice(0, i); else name += ".";
+      if (type && !callbacksByType.hasOwnProperty(type)) throw new Error("unknown type: " + type);
+      return {type: type, name: name};
+    }
+
+    function applier(type) {
+      return function() {
+        var callbacks = callbacksByType[type], // Defensive reference; copy-on-remove.
+            callback,
+            callbackValue,
+            i = -1,
+            n = callbacks.length;
+
+        while (++i < n) {
+          if (callbackValue = (callback = callbacks[i]).value) {
+            callbackValue.apply(this, arguments);
+          }
+        }
+
+        return that;
+      };
+    }
+  }
+
+  function dispatch() {
+    return new Dispatch(arguments);
+  }
+
+  dispatch.prototype = Dispatch.prototype; // allow instanceof
+
+  exports.dispatch = dispatch;
+
+}));
+},{}]},{},[1])(1)
+});
+
+  var fill = d3.scale.category20();
+  var words = [
+  {
+    "text": "trove", 
+    "size": 119
+  }, 
+  {
+    "text": "history", 
+    "size": 102
+  }, 
+  {
+    "text": "research", 
+    "size": 88
+  }, 
+  {
+    "text": "australian", 
+    "size": 51
+  }, 
+  {
+    "text": "important", 
+    "size": 51
+  }, 
+  {
+    "text": "accessible", 
+    "size": 49
+  }, 
+  {
+    "text": "under", 
+    "size": 47
+  }, 
+  {
+    "text": "cuts", 
+    "size": 45
+  }, 
+  {
+    "text": "resource", 
+    "size": 43
+  }, 
+  {
+    "text": "without", 
+    "size": 43
+  }, 
+  {
+    "text": "historical", 
+    "size": 41
+  }, 
+  {
+    "text": "making", 
+    "size": 40
+  }, 
+  {
+    "text": "use", 
+    "size": 39
+  }, 
+  {
+    "text": "world", 
+    "size": 39
+  }, 
+  {
+    "text": "standard,", 
+    "size": 37
+  }, 
+  {
+    "text": "international", 
+    "size": 37
+  }, 
+  {
+    "text": "digital", 
+    "size": 37
+  }, 
+  {
+    "text": "resource,", 
+    "size": 37
+  }, 
+  {
+    "text": "outstanding", 
+    "size": 37
+  }, 
+  {
+    "text": "setting", 
+    "size": 37
+  }, 
+  {
+    "text": "budget", 
+    "size": 35
+  }, 
+  {
+    "text": "much", 
+    "size": 35
+  }, 
+  {
+    "text": "ways", 
+    "size": 34
+  }, 
+  {
+    "text": "access", 
+    "size": 33
+  }, 
+  {
+    "text": "australians", 
+    "size": 33
+  }, 
+  {
+    "text": "threat", 
+    "size": 33
+  }, 
+  {
+    "text": "many", 
+    "size": 32
+  }, 
+  {
+    "text": "australia", 
+    "size": 32
+  }, 
+  {
+    "text": "using", 
+    "size": 32
+  }, 
+  {
+    "text": "work", 
+    "size": 31
+  }, 
+  {
+    "text": "now", 
+    "size": 31
+  }, 
+  {
+    "text": "tool", 
+    "size": 31
+  }, 
+  {
+    "text": "admired", 
+    "size": 30
+  }, 
+  {
+    "text": "invaluable", 
+    "size": 30
+  }, 
+  {
+    "text": "global", 
+    "size": 29
+  }, 
+  {
+    "text": "public", 
+    "size": 29
+  }, 
+  {
+    "text": "funded", 
+    "size": 29
+  }, 
+  {
+    "text": "help", 
+    "size": 29
+  }, 
+  {
+    "text": "content", 
+    "size": 29
+  }, 
+  {
+    "text": "open", 
+    "size": 29
+  }, 
+  {
+    "text": "new", 
+    "size": 29
+  }, 
+  {
+    "text": "innovation", 
+    "size": 29
+  }, 
+  {
+    "text": "leader", 
+    "size": 29
+  }, 
+  {
+    "text": "newspapers", 
+    "size": 29
+  }, 
+  {
+    "text": "inspiration", 
+    "size": 29
+  }, 
+  {
+    "text": "great", 
+    "size": 29
+  }, 
+  {
+    "text": "more", 
+    "size": 29
+  }, 
+  {
+    "text": "local", 
+    "size": 29
+  }, 
+  {
+    "text": "properly", 
+    "size": 29
+  }, 
+  {
+    "text": "beyond", 
+    "size": 28
+  }, 
+  {
+    "text": "historians,", 
+    "size": 28
+  }, 
+  {
+    "text": "helps", 
+    "size": 27
+  }, 
+  {
+    "text": "changed", 
+    "size": 27
+  }, 
+  {
+    "text": "tell", 
+    "size": 27
+  }, 
+  {
+    "text": "projects", 
+    "size": 27
+  }, 
+  {
+    "text": "discoverable", 
+    "size": 27
+  }, 
+  {
+    "text": "sort", 
+    "size": 27
+  }, 
+  {
+    "text": "sector", 
+    "size": 27
+  }, 
+  {
+    "text": "source", 
+    "size": 27
+  }, 
+  {
+    "text": "essential", 
+    "size": 27
+  }, 
+  {
+    "text": "support", 
+    "size": 27
+  }, 
+  {
+    "text": "better,", 
+    "size": 26
+  }, 
+  {
+    "text": "existing", 
+    "size": 26
+  }, 
+  {
+    "text": "vital", 
+    "size": 26
+  }, 
+  {
+    "text": "researchers", 
+    "size": 26
+  }, 
+  {
+    "text": "resources", 
+    "size": 25
+  }, 
+  {
+    "text": "afford", 
+    "size": 25
+  }, 
+  {
+    "text": "future", 
+    "size": 25
+  }, 
+  {
+    "text": "aggregator", 
+    "size": 25
+  }, 
+  {
+    "text": "add", 
+    "size": 25
+  }, 
+  {
+    "text": "govt", 
+    "size": 25
+  }, 
+  {
+    "text": "world-leading", 
+    "size": 25
+  }, 
+  {
+    "text": "longer", 
+    "size": 25
+  }, 
+  {
+    "text": "deserv\u2026", 
+    "size": 25
+  }, 
+  {
+    "text": "small", 
+    "size": 25
+  }, 
+  {
+    "text": "cuts\u2026", 
+    "size": 25
+  }, 
+  {
+    "text": "publicly-funded", 
+    "size": 25
+  }, 
+  {
+    "text": "hard", 
+    "size": 25
+  }, 
+  {
+    "text": "non-academic", 
+    "size": 25
+  }, 
+  {
+    "text": "make", 
+    "size": 25
+  }, 
+  {
+    "text": "collections", 
+    "size": 25
+  }, 
+  {
+    "text": "audience", 
+    "size": 25
+  }, 
+  {
+    "text": "teaching", 
+    "size": 24
+  }, 
+  {
+    "text": "family", 
+    "size": 24
+  }, 
+  {
+    "text": "service", 
+    "size": 24
+  }, 
+  {
+    "text": "undergrads", 
+    "size": 24
+  }, 
+  {
+    "text": "online", 
+    "size": 24
+  }, 
+  {
+    "text": "treasures", 
+    "size": 24
+  }, 
+  {
+    "text": "used", 
+    "size": 24
+  }, 
+  {
+    "text": "diss'ns", 
+    "size": 24
+  }, 
+  {
+    "text": "tag:", 
+    "size": 23
+  }, 
+  {
+    "text": "even", 
+    "size": 23
+  }, 
+  {
+    "text": "sun", 
+    "size": 23
+  }, 
+  {
+    "text": "told", 
+    "size": 23
+  }, 
+  {
+    "text": "risk\n\nbudget", 
+    "size": 23
+  }, 
+  {
+    "text": "impact'", 
+    "size": 23
+  }, 
+  {
+    "text": "light", 
+    "size": 23
+  }, 
+  {
+    "text": "midnight", 
+    "size": 23
+  }, 
+  {
+    "text": "faraway", 
+    "size": 23
+  }, 
+  {
+    "text": "doing", 
+    "size": 23
+  }, 
+  {
+    "text": "staff", 
+    "size": 23
+  }, 
+  {
+    "text": "northern", 
+    "size": 23
+  }, 
+  {
+    "text": "globally,", 
+    "size": 23
+  }, 
+  {
+    "text": "rely", 
+    "size": 23
+  }, 
+  {
+    "text": "check", 
+    "size": 23
+  }, 
+  {
+    "text": "land", 
+    "size": 23
+  }, 
+  {
+    "text": "securely", 
+    "size": 23
+  }, 
+  {
+    "text": "writing", 
+    "size": 23
+  }, 
+  {
+    "text": "imagine", 
+    "size": 23
+  }, 
+  {
+    "text": "accurately", 
+    "size": 23
+  }, 
+  {
+    "text": "cultural", 
+    "size": 23
+  }, 
+  {
+    "text": "within", 
+    "size": 23
+  }, 
+  {
+    "text": "stories", 
+    "size": 23
+  }, 
+  {
+    "text": "students", 
+    "size": 23
+  }, 
+  {
+    "text": "australia!", 
+    "size": 22
+  }, 
+  {
+    "text": "name", 
+    "size": 22
+  }, 
+  {
+    "text": "connect", 
+    "size": 22
+  }, 
+  {
+    "text": "regional", 
+    "size": 22
+  }, 
+  {
+    "text": "europeana", 
+    "size": 22
+  }, 
+  {
+    "text": "best", 
+    "size": 22
+  }, 
+  {
+    "text": "interface", 
+    "size": 22
+  }, 
+  {
+    "text": "newspaper", 
+    "size": 22
+  }, 
+  {
+    "text": "groundbreaking", 
+    "size": 22
+  }, 
+  {
+    "text": "continues", 
+    "size": 21
+  }, 
+  {
+    "text": "past", 
+    "size": 21
+  }, 
+  {
+    "text": "supporting", 
+    "size": 21
+  }, 
+  {
+    "text": "call", 
+    "size": 21
+  }, 
+  {
+    "text": "everywhere", 
+    "size": 21
+  }, 
+  {
+    "text": "writers", 
+    "size": 21
+  }, 
+  {
+    "text": "internationally", 
+    "size": 21
+  }, 
+  {
+    "text": "opened", 
+    "size": 21
+  }, 
+  {
+    "text": "threatened", 
+    "size": 21
+  }, 
+  {
+    "text": "digitization", 
+    "size": 21
+  }, 
+  {
+    "text": "keep", 
+    "size": 21
+  }, 
+  {
+    "text": "already", 
+    "size": 21
+  }, 
+  {
+    "text": "scene", 
+    "size": 21
+  }, 
+  {
+    "text": "teams,", 
+    "size": 21
+  }, 
+  {
+    "text": "worldwide", 
+    "size": 21
+  }, 
+  {
+    "text": "drive", 
+    "size": 21
+  }, 
+  {
+    "text": "librarians,", 
+    "size": 21
+  }, 
+  {
+    "text": "set", 
+    "size": 21
+  }, 
+  {
+    "text": "innovative", 
+    "size": 21
+  }, 
+  {
+    "text": "culture", 
+    "size": 21
+  }, 
+  {
+    "text": "see", 
+    "size": 21
+  }, 
+  {
+    "text": "infrastructure", 
+    "size": 21
+  }, 
+  {
+    "text": "model", 
+    "size": 21
+  }, 
+  {
+    "text": "people", 
+    "size": 21
+  }, 
+  {
+    "text": "wake", 
+    "size": 21
+  }, 
+  {
+    "text": "welfare", 
+    "size": 21
+  }, 
+  {
+    "text": "very", 
+    "size": 21
+  }, 
+  {
+    "text": "priceless", 
+    "size": 21
+  }, 
+  {
+    "text": "next", 
+    "size": 21
+  }, 
+  {
+    "text": "struggled", 
+    "size": 21
+  }, 
+  {
+    "text": "fundamental", 
+    "size": 21
+  }, 
+  {
+    "text": "brain", 
+    "size": 21
+  }, 
+  {
+    "text": "history,", 
+    "size": 21
+  }, 
+  {
+    "text": "plurality", 
+    "size": 21
+  }, 
+  {
+    "text": "impossible", 
+    "size": 21
+  }, 
+  {
+    "text": "leading", 
+    "size": 21
+  }, 
+  {
+    "text": "needed", 
+    "size": 21
+  }, 
+  {
+    "text": "sad", 
+    "size": 21
+  }, 
+  {
+    "text": "build", 
+    "size": 21
+  }, 
+  {
+    "text": "effing", 
+    "size": 21
+  }, 
+  {
+    "text": "years,", 
+    "size": 21
+  }, 
+  {
+    "text": "country", 
+    "size": 21
+  }, 
+  {
+    "text": "menti\u2026", 
+    "size": 21
+  }, 
+  {
+    "text": "ensuring", 
+    "size": 21
+  }, 
+  {
+    "text": "lives", 
+    "size": 21
+  }, 
+  {
+    "text": "child", 
+    "size": 21
+  }, 
+  {
+    "text": "get?", 
+    "size": 21
+  }, 
+  {
+    "text": "abound", 
+    "size": 21
+  }, 
+  {
+    "text": "dead", 
+    "size": 21
+  }, 
+  {
+    "text": "nla?", 
+    "size": 21
+  }, 
+  {
+    "text": "impressed", 
+    "size": 21
+  }, 
+  {
+    "text": "long", 
+    "size": 21
+  }, 
+  {
+    "text": "i've", 
+    "size": 21
+  }, 
+  {
+    "text": "open,", 
+    "size": 21
+  }, 
+  {
+    "text": "large", 
+    "size": 20
+  }, 
+  {
+    "text": "archives", 
+    "size": 20
+  }, 
+  {
+    "text": "information", 
+    "size": 20
+  }, 
+  {
+    "text": "collections:", 
+    "size": 20
+  }, 
+  {
+    "text": "all,", 
+    "size": 20
+  }, 
+  {
+    "text": "mean", 
+    "size": 20
+  }, 
+  {
+    "text": "little", 
+    "size": 20
+  }, 
+  {
+    "text": "part", 
+    "size": 20
+  }, 
+  {
+    "text": "orgs", 
+    "size": 20
+  }, 
+  {
+    "text": "added", 
+    "size": 20
+  }, 
+  {
+    "text": "please", 
+    "size": 20
+  }, 
+  {
+    "text": "everyday", 
+    "size": 20
+  }, 
+  {
+    "text": "works", 
+    "size": 20
+  }, 
+  {
+    "text": "couldn't", 
+    "size": 20
+  }, 
+  {
+    "text": "promote", 
+    "size": 20
+  }, 
+  {
+    "text": "answer", 
+    "size": 19
+  }, 
+  {
+    "text": "communities", 
+    "size": 19
+  }, 
+  {
+    "text": "out", 
+    "size": 19
+  }, 
+  {
+    "text": "re\u2026", 
+    "size": 19
+  }, 
+  {
+    "text": "museum", 
+    "size": 19
+  }, 
+  {
+    "text": "archivists", 
+    "size": 19
+  }, 
+  {
+    "text": "find", 
+    "size": 19
+  }, 
+  {
+    "text": "archives,", 
+    "size": 19
+  }
+]
+
+  d3.layout.cloud().size([800, 800])
+      .words(words)
+      .rotate(function() { return ~~(Math.random() * 2) * 90; })
+      .font("Impact")
+      .fontSize(function(d) { return d.size; })
+      .on("end", draw)
+      .start();
+
+  function draw(words) {
+    d3.select("body").append("svg")
+        .attr("width", 1000)
+        .attr("height", 1000)
+      .append("g")
+        .attr("transform", "translate(400,400)")
+      .selectAll("text")
+        .data(words)
+      .enter().append("text")
+        .style("font-size", function(d) { return d.size + "px"; })
+        .style("font-family", "Impact")
+        .style("fill", function(d, i) { return fill(i); })
+        .attr("text-anchor", "middle")
+        .attr("transform", function(d) {
+          return "translate(" + [d.x, d.y] + ")rotate(" + d.rotate + ")";
+        })
+        .text(function(d) { return d.text; });
+  }
+</script>
+</body>
+</html>
+
